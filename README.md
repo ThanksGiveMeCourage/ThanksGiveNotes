@@ -1,2 +1,2 @@
 # ThanksGiveNotes
-感谢已然拥有的一切，赐予我追求未来的勇气。
+Thank you for everything nature has given me the courage to pursue the future
