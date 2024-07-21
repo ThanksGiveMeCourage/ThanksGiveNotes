@@ -119,7 +119,7 @@ S -> A: 824633835808, B: 824633835816, C: 824633835824
 
 **1(A) + 7(padding A-B) + 8(B) + 4(C) + 4(padding C-END) ---> 24 bytes**
 
-![](https://github.com/ThandsGive/ThanksGiveNotes/tree/main/images/struct_01.png)
+![](../../images/struct_01.png)
 
 ---
 
@@ -155,6 +155,6 @@ S -> A: 824634458112, B: 824634458120, C: 824634458124
 
 **8(A) + 4(B) + 1(C) + 3(padding C-END) ---> 16 bytes**
 
-![](https://github.com/ThandsGive/ThanksGiveNotes/tree/main/images/struct_02.png)
+![](../../images/struct_02.png)
 
 **所以，为了实现结构体的最小内存占用，对结构体对齐方式的最佳处理方式：[ 将结构体中的字段摆放顺序，按字段对齐要求从高到低进行排列 ]**
