@@ -24,7 +24,7 @@ Thank you for everything nature has given me the courage to pursue the future
 
 | Languge | Version | Notes |
 |:-------:|:-------:|:------|
-|Go|1.20.6 darwin/amd64<br>|[Go-杂谈-闭包问题已解决了](notes/golang/closure_problem.md)<br>[Go-杂谈-Go 的函数传参都是 值拷贝](notes/golang/function_params_passing.md)<br>[Go-正谈-slice](notes/golang/slice.md)<br>|
-
+|Go-Classics|1.20.6 darwin/amd64<br>|[Go-正谈-slice](notes/golang/slice.md)<br>|
+|Go-Other|1.20.6 darwin/amd64<br>|[Go-杂谈-闭包问题已解决了](notes/golang/closure_problem.md)<br>[Go-杂谈-Go 的函数传参都是 值拷贝](notes/golang/function_params_passing.md)<br>[Go-杂谈-对齐方式](notes/golang/alignment.md)<br>|
 
 ----------------------------
