@@ -520,4 +520,225 @@ oldCap: 29030400, addNum: 36, newLen: 29030436, newCap: 36288192, newCap/oldCap:
 * 2、否则，如果 新长度(newLen) 小于等于 doublecap ---> 进入大小切片扩容机制
 * * 2.1、如果 当前容量(oldCap) 小于 阈值常量(threshold=256)，则 将 【新容量(newcap) 设置为当前容量的两倍】
 * * 2.2、如果 当前容量(oldCap) 大于等于 阈值常量(threshold=256)，则 【使用 for 循环逐步增加 新容量(newcap)，直到其至少能够容纳 新长度(newLen)，每次增长的比例约为 1.25 倍】
+
+### 关于以数组截取的方式创建切片后，其底层数组为同源数据
+```go
+func dealArrayToSlice() {
+	array := [4]int{10, 20, 30, 40}
+	// 创建一个切片，引用该数组的一部分
+	startI := 0
+	endI := 2
+
+	slice := array[startI:endI]
+
+	checkNewSlice := append(slice, 50)
+
+	// 获取 array 的起始地址
+	arrayAddress := unsafe.Pointer(&array[0])
+	// 获取 slice 的起始地址
+	sliceAddress := getSliceStartAddress(slice, startI)
+	// 获取 checkNewSlice 的起始地址
+	checkNewSliceAddress := getSliceStartAddress(checkNewSlice, startI)
+
+	fmt.Printf("array: %v, Address: %p\n", array, &arrayAddress)
+	fmt.Printf("slice: %v, Address: %p, len: %d, cap: %d\n", slice, &sliceAddress, len(slice), cap(slice))
+	fmt.Printf("checkNewSlice: %v, Address: %p, len: %d, cap: %d\n", checkNewSlice, &checkNewSliceAddress, len(checkNewSlice), cap(checkNewSlice))
+	fmt.Println("---------------------------------------------------------------------------------------")
+
+	// 修改 checkNewSlice 中的一个值，用于确认数据同源的修改
+	checkNewSlice[1] += 10
+
+	// 获取 array 的起始地址
+	arrayAddress = unsafe.Pointer(&array[0])
+	// 获取 slice 的起始地址
+	sliceAddress = getSliceStartAddress(slice, startI)
+	// 获取 checkNewSlice 的起始地址
+	checkNewSliceAddress = getSliceStartAddress(checkNewSlice, startI)
+
+	fmt.Printf("array: %v, Address: %p\n", array, &arrayAddress)
+	fmt.Printf("slice: %v, Address: %p, len: %d, cap: %d\n", slice, &sliceAddress, len(slice), cap(slice))
+	fmt.Printf("checkNewSlice: %v, Address: %p, len: %d, cap: %d\n", checkNewSlice, &checkNewSliceAddress, len(checkNewSlice), cap(checkNewSlice))
+	fmt.Println("---------------------------------------------------------------------------------------")
+
+	// for循环 append，用于强制触发切片的扩容机制
+	for i := 100; i < 110; i++ {
+		slice = append(slice, i)
+	}
+
+	// 获取 array 的起始地址
+	arrayAddress = unsafe.Pointer(&array[0])
+	// 获取 slice 的起始地址
+	sliceAddress = getSliceStartAddress(slice, startI)
+	// 获取 checkNewSlice 的起始地址
+	checkNewSliceAddress = getSliceStartAddress(checkNewSlice, startI)
+
+	fmt.Printf("array: %v, Address: %p\n", array, &arrayAddress)
+	fmt.Printf("slice: %v, Address: %p, len: %d, cap: %d\n", slice, &sliceAddress, len(slice), cap(slice))
+	fmt.Printf("checkNewSlice: %v, Address: %p, len: %d, cap: %d\n", checkNewSlice, &checkNewSliceAddress, len(checkNewSlice), cap(checkNewSlice))
+	fmt.Println("---------------------------------------------------------------------------------------")
+}
+
+func getSliceStartAddress(slice any, index int) unsafe.Pointer {
+	sliceV := reflect.ValueOf(slice)
+	if sliceV.Kind() != reflect.Slice {
+		panic("input is not a slice")
+	}
+	// 获取指向切片数据的指针，并将其转换为 uintptr 类型
+	sliceDataPtr := sliceV.Pointer()
+	// 计算底层数组的起始地址
+	arrayStartAddress := unsafe.Pointer(sliceDataPtr - uintptr(index)*uintptr(sliceV.Type().Elem().Size()))
+	return arrayStartAddress
+}
+
+func main() {
+	dealArrayToSlice()
+}
+/* 
+array: [10 20 50 40], Address: 0xc0001a4020
+slice: [10 20], Address: 0xc0001a4028, len: 2, cap: 4
+checkNewSlice: [10 20 50], Address: 0xc0001a4030, len: 3, cap: 4
+---------------------------------------------------------------------------------------
+array: [10 30 50 40], Address: 0xc0001a4020
+slice: [10 30], Address: 0xc0001a4028, len: 2, cap: 4
+checkNewSlice: [10 30 50], Address: 0xc0001a4030, len: 3, cap: 4
+---------------------------------------------------------------------------------------
+array: [10 30 100 101], Address: 0xc0001a4020
+slice: [10 30 100 101 102 103 104 105 106 107 108 109], Address: 0xc0001a4028, len: 12, cap: 16
+checkNewSlice: [10 30 100], Address: 0xc0001a4030, len: 3, cap: 4
+---------------------------------------------------------------------------------------
+*/
+```
+从上面的代码实例的打印输出中，我们可以知晓：
+* 1、以数组截取的方式创建切片时，数组与切片的内存地址为同源数据，在切片未触发扩容前，对切片的所有操作都会反馈到这份同源的底层数组身上；
+* 2、而当切片触发扩容后，对应的切片会通过内存分配器获取到全新的一份内存空间，而后【拷贝】一份数组数据到属于切片自己的内存空间中，从而与源数组彻底分离开了；
+
+请注意，此【拷贝】非是 copy函数。
+这里的【拷贝】只得是 memmove(p, oldPtr, lenmem)
+```go
+/* 
+	memove 是在汇编层面上的内存操作指令，用于将 from 地址开始的 n 个字节复制到 to 地址
+	memove 函数确保当 from 内存块包含指针时，任何指针都被原子性地写入 to 中。这意味着复制过程中不能在指针的一半写入过程中被打断，防止并发读操作看到半写入的指针。这种设计主要是为了防止垃圾收集器在扫描内存时遇到无效指针
+
+	//go:noescape
+	这条指令告诉编译器，参数 to 和 from 不会逃逸到堆上。这是一种优化手段，使得编译器能更好地管理栈和堆的内存分配
+*/
+// memmove copies n bytes from "from" to "to".
+//
+// memmove ensures that any pointer in "from" is written to "to" with
+// an indivisible write, so that racy reads cannot observe a
+// half-written pointer. This is necessary to prevent the garbage
+// collector from observing invalid pointers, and differs from memmove
+// in unmanaged languages. However, memmove is only required to do
+// this if "from" and "to" may contain pointers, which can only be the
+// case if "from", "to", and "n" are all be word-aligned.
+//
+// Implementations are in memmove_*.s.
+//
+//go:noescape
+func memmove(to, from unsafe.Pointer, n uintptr)
+```
+
 ## Slice 的拷贝
+而在 go 语言层面上封装的 拷贝，则是在 copy 函数下基于不同类型而开发的独立逻辑。而 slice 中的 copy，那自然就是 slicecopy 了。(HH，so cold)🥶
+```go
+// slicecopy is used to copy from a string or slice of pointerless elements into a slice.(用于复制 字符串 或 无指针元素的切片 到另一个切片的函数)
+// width uintptr ：每个元素的字节宽度
+func slicecopy(toPtr unsafe.Pointer, toLen int, fromPtr unsafe.Pointer, fromLen int, width uintptr) int {
+	/* 
+		fromLen == 0 ：源数据长度为0 ---> 无数据可用于读取
+		toLen == 0 ： 目标切片长度为0 ---> 无内存可用于写入
+	*/
+	if fromLen == 0 || toLen == 0 {
+		return 0
+	}
+
+	// 能复制的长度，取  fromLen 和 toLen 中 更短的那个
+	n := fromLen
+	if toLen < n {
+		n = toLen
+	}
+
+	if width == 0 {
+		return n
+	}
+
+	// 计算需要复制的总字节数
+	size := uintptr(n) * width
+
+	// true : 启用竞态检测(调用相关函数对内存范围进行读写检测，防止数据竞争)
+	if raceenabled {
+		callerpc := getcallerpc()
+		pc := abi.FuncPCABIInternal(slicecopy)
+		racereadrangepc(fromPtr, size, callerpc, pc)
+		racewriterangepc(toPtr, size, callerpc, pc)
+	}
+	// msanenabled 和 asanenabled --- 启用内存检测
+	if msanenabled {
+		msanread(fromPtr, size)
+		msanwrite(toPtr, size)
+	}
+	if asanenabled {
+		asanread(fromPtr, size)
+		asanwrite(toPtr, size)
+	}
+
+	if size == 1 { // common case worth about 2x to do here（这种优化大约能提高 2倍性能）
+		// TODO: is this still worth it with new memmove impl?
+		/* 
+			size == 1的前提，有且仅有，n = 1，width = 1。也就是复制一个字节元素
+		*/
+		*(*byte)(toPtr) = *(*byte)(fromPtr) // known to be a byte pointer
+	} else {
+		memmove(toPtr, fromPtr, size)
+	}
+	return n
+}
+```
+在上述源码中，最为让人在意的点，就是针对 单字节元素的优化处理，且在写法上也比较特别，是值得去对其进行一番解析的
+```go
+*(*byte)(toPtr) = *(*byte)(fromPtr) // known to be a byte pointer
+```
+* 1、*(*byte)(toPtr) ：获取 toPtr 内存地址中的实际内容值。
+* * 1.1、toPtr : 是一个 unsafe.Pointer 类型，它可以指向任意类型的内存地址；
+* * 1.2、(*byte)(toPtr) ：在 size == 1 的大前提下，我们已经知晓了元素类型只能是 byte，所以直接进行强制类型转换，将其转化为一个指向 byte 类型的内存地址；
+* * 1.3、*(*byte)(toPtr) ：* 的作用是对 1.2 步骤中的 byte 指针进行 解引用，用于得到该指针指向内存地址的实际内容（即一个 byte 值）
+* 2、*(*byte)(fromPtr) ：获取 fromPtr 内存地址中的实际内容值。--- (解析步骤同上)
+* 3、= 的赋值操作 ：将 fromPtr 所指向的【实际内容值(即一个 byte 值)】 赋值给 toPtr 所指向的【内存地址】
+* * 这里就需要说明 = 的赋值概念中的左右角色：
+* * * = 左边 ：它表示目标位置，即内存地址，可以向该地址进行写操作
+* * * = 右边 ：它表示数据的值
+* * 同时这里也可以引申一下，赋值的 3步走：
+* * * 第 1 步 : 计算右值。计算 = 右边的表达式，得到需要赋值给左边的数据值
+* * * 第 2 步 : 解析左地址。解析 = 左边的表达式，确定数据要存放的内存地址
+* * * 第 3 步 : 将 右值 存储到 左地址。
+
+### 同时我们应该注意到：*(*byte)(toPtr) = *(*byte)(fromPtr) ，这是一个直接对指针地址进行解引用，属于直接操作内存地址来进行值传递，这样的高级写法，得以实现更为高效的数据复制
+
+我们可以使用下面案例进一步进行理解
+```go
+func main() {
+	var src byte = 255
+	var dst byte
+
+	srcPtr := unsafe.Pointer(&src)
+	dstPtr := unsafe.Pointer(&dst)
+	fmt.Printf("src, address: %p, value: %d\n", srcPtr, *(*byte)(srcPtr))
+	fmt.Printf("dst, address: %p, value: %d\n", dstPtr, *(*byte)(dstPtr))
+
+	// copy
+	*(*byte)(dstPtr) = *(*byte)(srcPtr)
+	fmt.Println("----------------------------------------------------------------")
+
+	srcPtr = unsafe.Pointer(&src)
+	dstPtr = unsafe.Pointer(&dst)
+	fmt.Printf("src, address: %p, value: %d\n", srcPtr, *(*byte)(srcPtr))
+	fmt.Printf("dst, address: %p, value: %d\n", dstPtr, *(*byte)(dstPtr))
+}
+/* 
+src, address: 0xc000018078, value: 255
+dst, address: 0xc000018079, value: 0
+----------------------------------------------------------------
+src, address: 0xc000018078, value: 255
+dst, address: 0xc000018079, value: 255
+*/
+```
