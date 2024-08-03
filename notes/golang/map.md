@@ -386,3 +386,7 @@ const (
 ```
 ---
 ## 3、map 的初始化
+* map 的 make 初始化创建的底层源码实现，是有两套方案：
+* * 1、小容量 map 的初始化：func makemap_small() *hmap
+* * 2、大容量 map 的初始化：func makemap(t *maptype, hint int, h *hmap) *hmap
+***小容量 map 的初始化***
