@@ -598,7 +598,7 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 * 2、预分配的 溢出桶 overflow 为 nil 的意义，这里首先需要区分两种不同环境下的 溢出桶overflow为nil：
 * * 2.1、常态情况下，常规 Go map 运行时，此时 Go map 中有一个 bucketA，当数据插入这个 bucketA 直到溢出时，如果此时 bucketA 的 overflow 仍为 nil，那么说明此时 Go map 中已经没有额外的预留空间用于数据分配了，只能向内存中重新申请了。
 * * 2.2、在初始化 Go map 时的预留溢出桶机制下，此时的 溢出桶 属于预分配的，还未被使用，那么它的 overlflow 字段自然是nil 的
-* 3、bumping the pointer(指针递增)的概念:  意味通过增加指针地址的方式来查找下一个内存位置。（这里是基于桶数组内存分配的连续性而得到的性质。而 预分配的溢出桶，其底层也是基于一个数组进行数据分配的，溢出桶的底层内存地址便由此一个接一个连续的）
+* 3、bumping the pointer(指针递增)的概念:  意味通过增加指针地址的方式来查找下一个内存位置。（这里是基于桶数组内存分配的连续性而得到的性质。由上文得知，桶数组是基于一个数量值( 本桶数 + 预分配的溢出桶数 )进行底层统一分配的。）
 
 ***2 - We need a safe non-nil pointer for the last overflow bucket; just use buckets.***  
 译文：对于最后一个溢出桶，我们需要一个安全的 非nil 指针，可以直接使用 buckets
