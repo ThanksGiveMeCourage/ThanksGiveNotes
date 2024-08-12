@@ -1323,3 +1323,186 @@ i & (1<<oldB - 1)
 在按位与的机制下，只有第 oldB 位才是有效的，所以上述结果都是 i，也就是 桶在旧哈希表中的索引
 ```
 ![](../../images/map007.png)
+
+在解析了 如何利用当前桶的索引来获取桶在旧哈希表中的索引 后，我们就可以在此基础上 解析旧桶的迁移逻辑了。
+```go
+/* 
+params:
+	t *maptype: 运行时 Go map 的映射
+	h *hmap：Go map 的头部信息
+	oldbucket uintptr：桶在旧哈希表中的索引
+*/
+func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
+	// 获取旧桶指针
+	b := (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.bucketsize)))
+	// 获取旧哈希表中的桶数量
+	newbit := h.noldbuckets()
+	/* 
+		b.tophash[0] > emptyOne && b.tophash[0] < minTopHash
+			emptyOne: 表示一个空槽位，但有一些具体意义（如 删除操作后留下的标记）
+			minTopHash: 表示 有效 tophash值 的最小值
+		任何 tophash值 介于 emptyOne 和 minTopHash 之间的槽位，都表示该桶已经被迁移过了
+
+		一致性 和 代表性：既然桶的迁移状态是一致的，那么检查任何一个槽位的 tophash 都能反映整个桶的状态。
+		性能优化：通过访问固定位置(默认为 0 下标)的单个元素，减少了内存访问次数，提高了缓存的命中率，从而提升整体性能
+		
+		true：已完成迁移
+	*/
+	if !evacuated(b) {
+		// TODO: reuse overflow buckets instead of using new ones, if there
+		// is no iterator using the old buckets.  (If !oldIterator.)
+		/* 
+		译文：
+			重用溢出桶 替代 创建一个新的。如果当前没有 迭代器在使用 旧桶数组。(If !oldIterator. 表示当前没有活跃的用于遍历的迭代器)
+			1、在 Go 中，当哈希表需要扩容时，可能会创建大量的新桶 和 溢出桶。如果能够重用已有桶，那么可以节省内存分配 和 回收的开销，从而提高性能；
+			2、通过检测是否有活跃的迭代器，可以确保数据的一致性，因为迭代器依赖于原始桶结构。无迭代器时，重用不会影响程序正确性。
+		*/
+
+		// xy contains the x and y (low and high) evacuation destinations.
+		/* 
+		译文：
+			xy 包含 x 和 y（低 和 高），用于存储迁移后的目的地
+			x：表示低位目标（low evacuation destination）
+			y：表示高位目标（high evacuation destination）
+		背景含义：
+			在哈希表扩容时，旧桶中的每个键值对都需要重新计算其在新桶数组中的位置。这通常涉及到将 键值对 分散到两个不同的新桶，从而均衡负载。
+			
+			示例：假设旧桶索引为 i，扩容后，新桶可能会分配索引 i 或 i + oldBucketCount。（索引逻辑前面已推导了，这里不再赘述）
+		*/
+
+		/* 
+		// evacDst 定义了 哈希表在扩容(迁移)过程中数据移动的目标位置
+			type evacDst struct {
+				b *bmap          // 指向 扩容后的 目标桶的指针
+				i int            // 指向 扩容后的 键值对 在 目标桶中的索引
+				k unsafe.Pointer // 指向 扩容后的 当前键 存储位置的指针
+				e unsafe.Pointer // 指向 扩容后的 当前值 存储位置的指针
+			}
+		*/
+
+		// 基于上述论证，x 表示低位，则指代 i
+		var xy [2]evacDst
+		x := &xy[0]
+		x.b = (*bmap)(add(h.buckets, oldbucket*uintptr(t.bucketsize)))
+		x.k = add(unsafe.Pointer(x.b), dataOffset)
+		x.e = add(x.k, bucketCnt*uintptr(t.keysize))
+
+		// 当前为倍量扩容，则 y 表示 高位，则 指代 i+oldBucketCount
+		if !h.sameSizeGrow() {
+			// Only calculate y pointers if we're growing bigger.
+			// Otherwise GC can see bad pointers.
+			y := &xy[1]
+			y.b = (*bmap)(add(h.buckets, (oldbucket+newbit)*uintptr(t.bucketsize)))
+			y.k = add(unsafe.Pointer(y.b), dataOffset)
+			y.e = add(y.k, bucketCnt*uintptr(t.keysize))
+		}
+
+		// 遍历 旧桶 和 其溢出桶
+		for ; b != nil; b = b.overflow(t) {
+			// 获取 k 和 e 在旧桶中的起始地址
+			k := add(unsafe.Pointer(b), dataOffset)
+			e := add(k, bucketCnt*uintptr(t.keysize))
+			// 根据 k 和 e 的起始地址，遍历数组，处理每个 key 和 elem 的迁移位置( 对于每个键值对，根据其哈希值决定搬迁到 x 或 y )
+			for i := 0; i < bucketCnt; i, k, e = i+1, add(k, uintptr(t.keysize)), add(e, uintptr(t.elemsize)) {
+				top := b.tophash[i]
+				// 如果 对应索引的 tophash 为空，则标记为 已搬迁且为空（evacuatedEmpty）
+				if isEmpty(top) {
+					b.tophash[i] = evacuatedEmpty
+					continue
+				}
+				// 搬迁过程中，出现了 top 小于 最小有效值，则说明出现了问题（因为 未搬迁完之前，不应该存在小于 最小有效值的 tophash）
+				if top < minTopHash {
+					throw("bad map state")
+				}
+				// 判定 key 是否为 间接键
+				k2 := k
+				if t.indirectkey() {
+					k2 = *((*unsafe.Pointer)(k2))
+				}
+				// 出现 y 情况的前提是：倍量扩容
+				var useY uint8
+				if !h.sameSizeGrow() {
+					// Compute hash to make our evacuation decision (whether we need
+					// to send this key/elem to bucket x or bucket y).
+					/* 
+					译文：
+						计算hash值，以便判定我们的迁移位置(看我们是需要将 key/elem 发送到 x 或 y)
+					*/
+					hash := t.hasher(k2, uintptr(h.hash0))
+					/* 
+					h.flags&iterator != 0: 检查当前哈希表是否有迭代器正在操作，如果有，则需要确保数据迁移的决定与迭代器的一致性 
+					!t.reflexivekey(): reflexivekey 是用于检查 键是否是 自反性（即 k == k）。如果键不是自反性的（如 NaN，k != k）
+					!t.key.equal(k2, k2): 检查 key 是否等于其自身，对于 NaN 值，k2 != k2
+
+					综上三个条件：当前情况下正在处理一个 NaN 的 键，且 存在迭代器
+					*/
+					if h.flags&iterator != 0 && !t.reflexivekey() && !t.key.equal(k2, k2) {
+						// If key != key (NaNs), then the hash could be (and probably
+						// will be) entirely different from the old hash. Moreover,
+						// it isn't reproducible. Reproducibility is required in the
+						// presence of iterators, as our evacuation decision must
+						// match whatever decision the iterator made.
+						// Fortunately, we have the freedom to send these keys either
+						// way. Also, tophash is meaningless for these kinds of keys.
+						// We let the low bit of tophash drive the evacuation decision.
+						// We recompute a new random tophash for the next level so
+						// these keys will get evenly distributed across all buckets
+						// after multiple grows.
+						useY = top & 1
+						top = tophash(hash)
+					} else {
+						if hash&newbit != 0 {
+							useY = 1
+						}
+					}
+				}
+
+				if evacuatedX+1 != evacuatedY || evacuatedX^1 != evacuatedY {
+					throw("bad evacuatedN")
+				}
+
+				b.tophash[i] = evacuatedX + useY // evacuatedX + 1 == evacuatedY
+				dst := &xy[useY]                 // evacuation destination
+
+				if dst.i == bucketCnt {
+					dst.b = h.newoverflow(t, dst.b)
+					dst.i = 0
+					dst.k = add(unsafe.Pointer(dst.b), dataOffset)
+					dst.e = add(dst.k, bucketCnt*uintptr(t.keysize))
+				}
+				dst.b.tophash[dst.i&(bucketCnt-1)] = top // mask dst.i as an optimization, to avoid a bounds check
+				if t.indirectkey() {
+					*(*unsafe.Pointer)(dst.k) = k2 // copy pointer
+				} else {
+					typedmemmove(t.key, dst.k, k) // copy elem
+				}
+				if t.indirectelem() {
+					*(*unsafe.Pointer)(dst.e) = *(*unsafe.Pointer)(e)
+				} else {
+					typedmemmove(t.elem, dst.e, e)
+				}
+				dst.i++
+				// These updates might push these pointers past the end of the
+				// key or elem arrays.  That's ok, as we have the overflow pointer
+				// at the end of the bucket to protect against pointing past the
+				// end of the bucket.
+				dst.k = add(dst.k, uintptr(t.keysize))
+				dst.e = add(dst.e, uintptr(t.elemsize))
+			}
+		}
+		// Unlink the overflow buckets & clear key/elem to help GC.
+		if h.flags&oldIterator == 0 && t.bucket.ptrdata != 0 {
+			b := add(h.oldbuckets, oldbucket*uintptr(t.bucketsize))
+			// Preserve b.tophash because the evacuation
+			// state is maintained there.
+			ptr := add(b, dataOffset)
+			n := uintptr(t.bucketsize) - dataOffset
+			memclrHasPointers(ptr, n)
+		}
+	}
+
+	if oldbucket == h.nevacuate {
+		advanceEvacuationMark(h, t, newbit)
+	}
+}
+```
