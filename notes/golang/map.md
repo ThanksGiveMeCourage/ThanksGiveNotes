@@ -1448,32 +1448,56 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 						// We recompute a new random tophash for the next level so
 						// these keys will get evenly distributed across all buckets
 						// after multiple grows.
+						/* 
+						译文：
+							如果 key != key（则 key 为 NaNs），这会造成造成(每次哈希运算得到的)哈希值 都可能 与 旧hash值 完全不同 且 它是不可重复的。而在迭代器存在的情况下， 需要保证结果的可重复性，因为我们迁移策略必须与迭代器所做的任何决策相一致。
+
+							幸运的是，我们可以自由将这些键进行任意方向的传递。此外，对于这些类型的键，tophash 是没有意义。
+							我们让 tophash 的最低位来决定迁移操作。我们为下一层重新计算一个新的随机 tophash ，以确保在多次增长后，这些键能均匀分布在所有桶中。
+						*/
+						// 根据 tophash 的最低位来决定是否使用 高位目标
 						useY = top & 1
+						// 重新计算新的随机 tophash 值，用于下一层的键值分布
 						top = tophash(hash)
 					} else {
+						// 不是 NaNs ，则进行常规操作
+						// hash & 旧桶数量(2^oldB ---> 类比：100000)，如此想要 hash&newbit != 0，那么就说明 hash 的 第 oldB + 1 位 必为 1，如此自然就能判定选 高位目标桶
 						if hash&newbit != 0 {
 							useY = 1
 						}
 					}
 				}
 
+				/* 
+					emptyRest      = 0 // 表示当前槽位以及更高索引和溢出桶（如果有的话）都是空的
+					emptyOne       = 1 // 仅表示当前槽位为空
+					evacuatedX     = 2 // 该键值对是有效的，且已经被迁移到扩容后哈希表的前半部分(低位桶)
+					evacuatedY     = 3 // 该键值对是有效的，且已经被迁移到扩容后哈希表的后半部分(高位桶)
+					evacuatedEmpty = 4 // 该槽位是空的，并且整个桶已经被迁移。(用于在扩容过程中标记已经完全迁移走的桶，以防止重复处理)
+					minTopHash     = 5 // 正常填充槽位的最小 tophash 值（小于 minTopHash 的值用于特殊标记，从 minTopHash 开始的值代表实际的哈希值高位）
+				*/
+				// evacuatedX 和 evacuatedY 必须连续
 				if evacuatedX+1 != evacuatedY || evacuatedX^1 != evacuatedY {
 					throw("bad evacuatedN")
 				}
 
-				b.tophash[i] = evacuatedX + useY // evacuatedX + 1 == evacuatedY
+				b.tophash[i] = evacuatedX + useY // evacuatedX + 1 == evacuatedY (基于前面的 useY 的赋值(0 或 1)，标记当前桶的 第i个位置 已迁移到扩容后的哈希表的(前/后)部分(低/高 位桶) )
 				dst := &xy[useY]                 // evacuation destination
 
+				// 如果 dst.i == bucketCnt，表示当前 目标桶已满，需要分配 新的溢出桶
 				if dst.i == bucketCnt {
-					dst.b = h.newoverflow(t, dst.b)
-					dst.i = 0
-					dst.k = add(unsafe.Pointer(dst.b), dataOffset)
-					dst.e = add(dst.k, bucketCnt*uintptr(t.keysize))
+					dst.b = h.newoverflow(t, dst.b) // newoverflow 分配一个新的溢出桶，并更新 dst.b
+					dst.i = 0 // 重置索引
+					dst.k = add(unsafe.Pointer(dst.b), dataOffset) // 更新 新分配溢出桶 key 的 起始地址
+					dst.e = add(dst.k, bucketCnt*uintptr(t.keysize)) // 更新 新分配溢出桶 elem 的 起始地址
 				}
-				dst.b.tophash[dst.i&(bucketCnt-1)] = top // mask dst.i as an optimization, to avoid a bounds check
+				// 设置 对应下标位 i 的 tophash
+				dst.b.tophash[dst.i&(bucketCnt-1)] = top //（使用 dst.i&(bucketCnt-1) 进行掩码操作，这是一个优化技巧，避免数组越界 ）
+				// 判定 key 是否 间接键（间接键 则需要 存储指针）
 				if t.indirectkey() {
 					*(*unsafe.Pointer)(dst.k) = k2 // copy pointer
 				} else {
+					// 将 源键数据 k 复制到 目标位置 dst.k ( typedmemmove 是个运行时库函数，用于在内存中移动类型化数据)
 					typedmemmove(t.key, dst.k, k) // copy elem
 				}
 				if t.indirectelem() {
@@ -1490,17 +1514,27 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 				dst.e = add(dst.e, uintptr(t.elemsize))
 			}
 		}
-		// Unlink the overflow buckets & clear key/elem to help GC.
+		// Unlink the overflow buckets & clear key/elem to help GC.（断开溢出桶的链接 并 清除键值对 来 帮助 GC）
+		/* 
+			h.flags&oldIterator == 0 : 检查哈希表的标记位，确定当前是否没有旧的迭代器正在操作哈希表。如果有旧的迭代器，则不能立即清除数据以避免影响迭代操作 
+			t.bucket.ptrdata != 0 : 检查桶中是否包含指针。如果桶中没有指针(例如：纯整数类型)，则不需要进行这一步，因为这些数据不会影响垃圾回收
+		*/
 		if h.flags&oldIterator == 0 && t.bucket.ptrdata != 0 {
+			// 获取 当前桶 在 旧哈希表中的 内存地址
 			b := add(h.oldbuckets, oldbucket*uintptr(t.bucketsize))
 			// Preserve b.tophash because the evacuation
 			// state is maintained there.
+			// b + dataOffset，用于计算 桶的数据起始地址
 			ptr := add(b, dataOffset)
+			// 桶的字节大小 - 偏移量(dataOffset)，意为：刨去 桶中的元信息(tophash)，剩余部分就是数据区域的大小
 			n := uintptr(t.bucketsize) - dataOffset
+			// 清除数据区域的内容。这个函数会将指定内存区域清零，并且会通知垃圾回收器（GC）这些内存区域不再使用
 			memclrHasPointers(ptr, n)
 		}
 	}
-
+	/* 
+		哈希表扩展过程中处理迁移标记的逻辑。当旧桶的索引 等于 当前的迁移标记时，那证明旧桶中的所有元素都已经搬迁完毕了 
+	*/
 	if oldbucket == h.nevacuate {
 		advanceEvacuationMark(h, t, newbit)
 	}
